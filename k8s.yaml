@@ -1,0 +1,184 @@
+---
+# ── Namespace ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: matchmaker
+
+---
+# ── ConfigMap ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: matchmaker-config
+  namespace: matchmaker
+data:
+  LLM_BACKEND: "auto"
+  OLLAMA_HOST: "http://ollama-svc:11434"
+  OLLAMA_MODEL: "mistral"
+  LLM_TIMEOUT: "30"
+
+---
+# ── Secret (HF token — base64 encode your token) ──────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: matchmaker-secrets
+  namespace: matchmaker
+type: Opaque
+stringData:
+  HF_API_TOKEN: ""   # replace with actual token if using HF backend
+
+---
+# ── Matchmaker API Deployment ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matchmaker-api
+  namespace: matchmaker
+  labels:
+    app: matchmaker-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: matchmaker-api
+  template:
+    metadata:
+      labels:
+        app: matchmaker-api
+    spec:
+      containers:
+        - name: api
+          image: matchmaker-api:latest   # replace with your registry path
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: matchmaker-config
+            - secretRef:
+                name: matchmaker-secrets
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 25
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+
+---
+# ── Matchmaker Service ─────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: matchmaker-svc
+  namespace: matchmaker
+spec:
+  selector:
+    app: matchmaker-api
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
+
+---
+# ── Ollama StatefulSet ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ollama
+  namespace: matchmaker
+spec:
+  serviceName: ollama-svc
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      initContainers:
+        - name: pull-mistral
+          image: ollama/ollama:latest
+          command: ["sh", "-c", "ollama pull mistral"]
+          env:
+            - name: OLLAMA_HOST
+              value: "http://localhost:11434"
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              cpu: "1"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+          # GPU — uncomment for GPU nodes:
+          # limits:
+          #   nvidia.com/gpu: "1"
+  volumeClaimTemplates:
+    - metadata:
+        name: ollama-models
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+
+---
+# ── Ollama Service ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-svc
+  namespace: matchmaker
+spec:
+  selector:
+    app: ollama
+  ports:
+    - port: 11434
+      targetPort: 11434
+  clusterIP: None   # headless for StatefulSet
+
+---
+# ── HPA for matchmaker API ─────────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: matchmaker-hpa
+  namespace: matchmaker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: matchmaker-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

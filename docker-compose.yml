@@ -1,0 +1,80 @@
+version: "3.9"
+
+services:
+
+  # ── Matchmaker API ────────────────────────────────────────────────────────────
+  matchmaker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: matchmaker-api:latest
+    container_name: matchmaker-api
+    ports:
+      - "8000:8000"
+    environment:
+      LLM_BACKEND: auto          # try ollama first, then hf, then fallback
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: mistral      # model tag pulled below
+      HF_API_TOKEN: ${HF_API_TOKEN:-}
+      LLM_TIMEOUT: "30"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - matchmaker-net
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Ollama (Mistral-7B local inference) ───────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama_models:/root/.ollama   # persist downloaded models
+    ports:
+      - "11434:11434"
+    networks:
+      - matchmaker-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    # GPU support — uncomment if you have NVIDIA GPU:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ── Ollama model pull (one-shot init container) ────────────────────────────────
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - matchmaker-net
+    entrypoint: >
+      sh -c "ollama pull mistral && echo 'Mistral model ready'"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    restart: "no"
+
+volumes:
+  ollama_models:
+
+networks:
+  matchmaker-net:
+    driver: bridge
