@@ -11,6 +11,7 @@ Endpoints
 """
 
 import logging
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
 import time
 from contextlib import asynccontextmanager
 from typing import List
